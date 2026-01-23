@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # Valkey cache service
+  valkey:
+    image: valkey/valkey:latest
+    container_name: api-cache-valkey
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey-data:/data
+    command: valkey-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - api-cache-network
+    restart: unless-stopped
+
+  # API Cache Proxy service
+  api-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api-cache-proxy
+    ports:
+      - "8080:8080"
+    environment:
+      # Override config values via environment if needed
+      - CONFIG_PATH=/app/config.yaml
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - api-cache-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # Example upstream service (for testing)
+  # Replace this with your actual upstream service
+  upstream-mock:
+    image: kennethreitz/httpbin
+    container_name: api-cache-upstream
+    ports:
+      - "9000:80"
+    networks:
+      - api-cache-network
+    restart: unless-stopped
+
+volumes:
+  valkey-data:
+    driver: local
+
+networks:
+  api-cache-network:
+    driver: bridge

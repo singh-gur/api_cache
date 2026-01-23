@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+SPECS.md
+*.md
+
+# Development files
+.vscode
+.idea
+
+# Build artifacts
+api-cache
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+testdata/
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Logs
+*.log

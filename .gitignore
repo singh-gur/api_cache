@@ -16,3 +16,17 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Build artifacts
+/api-cache
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Dependencies
+vendor/
