@@ -4,7 +4,7 @@
 
 set -e
 
-API_URL="${API_URL:-http://localhost:8080}"
+API_URL="${API_URL:-http://localhost:8085}"
 ENDPOINT="${ENDPOINT:-/get}"
 
 echo "Testing API Cache Proxy at $API_URL"
