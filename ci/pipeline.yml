@@ -1,0 +1,377 @@
+---
+# Concourse CI/CD Pipeline for api-cache
+# Builds, tests, pushes, and signs Docker images
+
+resources:
+  - name: repo
+    type: git
+    icon: github
+    source:
+      uri: https://github.com/singh-gur/api_cache.git
+      branch: main
+      username: ((github_username))
+      password: ((github_token))
+
+  - name: docker-image
+    type: registry-image
+    icon: docker
+    source:
+      repository: regv2.gsingh.io/personal/api_cache
+      username: ((registry_username))
+      password: ((registry_password))
+      tag: latest
+
+  - name: docker-image-tagged
+    type: registry-image
+    icon: docker
+    source:
+      repository: regv2.gsingh.io/personal/api_cache
+      username: ((registry_username))
+      password: ((registry_password))
+
+jobs:
+  # ============================================================================
+  # Job: Test
+  # Runs tests and linting before building
+  # ============================================================================
+  - name: test
+    public: true
+    plan:
+      - get: repo
+        trigger: true
+
+      - task: test-and-lint
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: golang
+              tag: "1.25-alpine"
+
+          inputs:
+            - name: repo
+
+          caches:
+            - path: /go/pkg/mod
+
+          run:
+            path: sh
+            args:
+              - -euc
+              - |
+                cd repo
+
+                # Download dependencies
+                go mod download
+
+                # Format check
+                echo "Checking formatting..."
+                UNFORMATTED=$(gofmt -l .)
+                if [ -n "$UNFORMATTED" ]; then
+                  echo "Unformatted files:"
+                  echo "$UNFORMATTED"
+                  exit 1
+                fi
+
+                # Vet
+                echo "Running go vet..."
+                go vet ./...
+
+                # Tests
+                echo "Running tests..."
+                go test -v ./...
+
+                echo "All checks passed!"
+
+  # ============================================================================
+  # Job: Build and Push
+  # Builds Docker image, pushes to registry, signs with cosign
+  # ============================================================================
+  - name: build-and-push
+    public: true
+    plan:
+      - get: repo
+        trigger: true
+        passed: [test]
+
+      - task: build-image
+        privileged: true
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: concourse/oci-build-task
+              tag: latest
+
+          inputs:
+            - name: repo
+
+          outputs:
+            - name: image
+
+          params:
+            CONTEXT: repo
+            DOCKERFILE: repo/Dockerfile
+
+          run:
+            path: build
+
+      - put: docker-image
+        params:
+          image: image/image.tar
+          additional_tags: repo/.git/short_ref
+
+      - put: docker-image-tagged
+        params:
+          image: image/image.tar
+          additional_tags: repo/.git/ref
+
+      - task: sign-image
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: alpine
+              tag: latest
+
+          inputs:
+            - name: repo
+
+          params:
+            COSIGN_PRIVATE_KEY: ((cosign_private_key))
+            COSIGN_PASSWORD: ((cosign_password))
+            IMAGE_REPO: regv2.gsingh.io/personal/api_cache
+            REGISTRY_USERNAME: ((registry_username))
+            REGISTRY_PASSWORD: ((registry_password))
+
+          run:
+            path: sh
+            args:
+              - -euc
+              - |
+                # Install cosign
+                apk add --no-cache cosign git
+
+                # Login to registry
+                cosign login regv2.gsingh.io -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+
+                # Get the commit SHA for tagging
+                cd repo
+                COMMIT_SHA=$(git rev-parse --short HEAD)
+                cd ..
+
+                # Sign the images
+                echo "Signing image: ${IMAGE_REPO}:latest"
+                cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE_REPO}:latest" -y
+
+                echo "Signing image: ${IMAGE_REPO}:${COMMIT_SHA}"
+                cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE_REPO}:${COMMIT_SHA}" -y
+
+                echo "Images signed successfully"
+
+  # ============================================================================
+  # Job: Release (tag-based)
+  # Triggered manually for versioned releases
+  # ============================================================================
+  - name: release
+    public: true
+    plan:
+      - get: repo
+        trigger: false
+
+      - task: verify-tag
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: alpine/git
+              tag: latest
+
+          inputs:
+            - name: repo
+
+          outputs:
+            - name: tag-name
+
+          run:
+            path: sh
+            args:
+              - -euc
+              - |
+                cd repo
+
+                TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+
+                if [ -z "$TAG" ]; then
+                  echo "No tag found on current commit"
+                  exit 1
+                fi
+
+                echo "Found tag: $TAG"
+                echo "$TAG" > ../tag-name/tag-name
+
+      - task: build-release-image
+        privileged: true
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: concourse/oci-build-task
+              tag: latest
+
+          inputs:
+            - name: repo
+            - name: tag-name
+
+          outputs:
+            - name: image
+
+          params:
+            CONTEXT: repo
+            DOCKERFILE: repo/Dockerfile
+
+          run:
+            path: build
+
+      - put: docker-image-tagged
+        params:
+          image: image/image.tar
+          additional_tags: tag-name/tag-name
+
+      - task: sign-release-image
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: alpine
+              tag: latest
+
+          inputs:
+            - name: repo
+            - name: tag-name
+
+          params:
+            COSIGN_PRIVATE_KEY: ((cosign_private_key))
+            COSIGN_PASSWORD: ((cosign_password))
+            IMAGE_REPO: regv2.gsingh.io/personal/api_cache
+            REGISTRY_USERNAME: ((registry_username))
+            REGISTRY_PASSWORD: ((registry_password))
+
+          run:
+            path: sh
+            args:
+              - -euc
+              - |
+                apk add --no-cache cosign
+
+                cosign login regv2.gsingh.io -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+
+                TAG=$(cat tag-name/tag-name)
+
+                echo "Signing release image: ${IMAGE_REPO}:${TAG}"
+                cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE_REPO}:${TAG}" -y
+
+                echo "Release image signed successfully"
+
+  # ============================================================================
+  # Job: Security Scan
+  # Scans image for vulnerabilities and verifies signature
+  # ============================================================================
+  - name: security-scan
+    public: true
+    plan:
+      - get: repo
+        trigger: true
+        passed: [build-and-push]
+
+      - get: docker-image
+        trigger: true
+        passed: [build-and-push]
+
+      - task: trivy-scan
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: aquasec/trivy
+              tag: latest
+
+          inputs:
+            - name: repo
+
+          params:
+            IMAGE: regv2.gsingh.io/personal/api_cache:latest
+            REGISTRY_USERNAME: ((registry_username))
+            REGISTRY_PASSWORD: ((registry_password))
+
+          run:
+            path: sh
+            args:
+              - -euc
+              - |
+                echo "Scanning image: $IMAGE"
+
+                trivy registry login regv2.gsingh.io \
+                  --username "$REGISTRY_USERNAME" \
+                  --password "$REGISTRY_PASSWORD"
+
+                trivy image \
+                  --severity HIGH,CRITICAL \
+                  --exit-code 0 \
+                  --no-progress \
+                  "$IMAGE"
+
+                echo "Security scan complete"
+
+      - task: verify-signature
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: alpine
+              tag: latest
+
+          inputs:
+            - name: repo
+
+          params:
+            COSIGN_PUBLIC_KEY: ((cosign_public_key))
+            IMAGE: regv2.gsingh.io/personal/api_cache:latest
+            REGISTRY_USERNAME: ((registry_username))
+            REGISTRY_PASSWORD: ((registry_password))
+
+          run:
+            path: sh
+            args:
+              - -euc
+              - |
+                apk add --no-cache cosign
+
+                cosign login regv2.gsingh.io -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
+
+                echo "$COSIGN_PUBLIC_KEY" > cosign.pub
+                cosign verify --key cosign.pub "$IMAGE"
+
+                echo "Signature verification successful"
+
+# ============================================================================
+# Groups
+# ============================================================================
+groups:
+  - name: main
+    jobs:
+      - test
+      - build-and-push
+      - security-scan
+
+  - name: release
+    jobs:
+      - release

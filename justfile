@@ -4,6 +4,7 @@
 # Variables
 binary_name := "api-cache"
 docker_image := "api-cache:latest"
+registry_image := "regv2.gsingh.io/personal/api_cache"
 config_file := "config.yaml"
 
 # Default recipe - show help
@@ -45,6 +46,27 @@ docker-build:
     @echo "Building Docker image..."
     docker build -t {{docker_image}} .
     @echo "Docker image built: {{docker_image}}"
+
+# Git-derived image tags: git tag (or short commit hash) + branch name
+git_tag := `git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD`
+git_branch := `git rev-parse --abbrev-ref HEAD | sed 's/[^a-zA-Z0-9._-]/-/g'`
+
+# Build and tag image for registry (git tag/hash + branch)
+img-build:
+    @echo "Building image for registry..."
+    docker build --load -t {{registry_image}}:{{git_tag}} -t {{registry_image}}:{{git_branch}} .
+    @echo "Image built: {{registry_image}}:{{git_tag}} {{registry_image}}:{{git_branch}}"
+
+# Push image to registry (git tag/hash + branch)
+img-push:
+    @echo "Pushing {{registry_image}}:{{git_tag}} and {{registry_image}}:{{git_branch}}..."
+    docker push {{registry_image}}:{{git_tag}}
+    docker push {{registry_image}}:{{git_branch}}
+    @echo "Pushed: {{registry_image}}:{{git_tag}} {{registry_image}}:{{git_branch}}"
+
+# Build and push image to registry
+img-publish: img-build img-push
+    @echo "Published {{registry_image}}:{{git_tag}} and {{registry_image}}:{{git_branch}}"
 
 # Start services with docker-compose
 docker-up:
@@ -140,6 +162,30 @@ rebuild: clean build
 
 # Run all checks (fmt, test, lint)
 check: fmt test lint
+
+# Set Concourse pipeline
+ci-set TARGET:
+    ci/set-pipeline.sh {{TARGET}}
+
+# Trigger test job
+ci-test TARGET:
+    fly -t {{TARGET}} trigger-job -j api-cache/test
+
+# Trigger build job
+ci-build TARGET:
+    fly -t {{TARGET}} trigger-job -j api-cache/build-and-push
+
+# Trigger release job
+ci-release TARGET:
+    fly -t {{TARGET}} trigger-job -j api-cache/release
+
+# Watch build job logs
+ci-watch TARGET:
+    fly -t {{TARGET}} watch -j api-cache/build-and-push
+
+# Destroy pipeline
+ci-destroy TARGET:
+    fly -t {{TARGET}} destroy-pipeline -p api-cache
 
 # Quick start - setup and run everything
 quickstart: docker-up
