@@ -44,17 +44,18 @@ type CacheConfig struct {
 }
 
 type EndpointCacheConfig struct {
-	Path                string            `yaml:"path"`
-	PathRegex           string            `yaml:"path_regex"`
-	Methods             []string          `yaml:"methods"`
-	TTL                 time.Duration     `yaml:"ttl"`
-	CacheKeyHeaders     []string          `yaml:"cache_key_headers"`
-	CacheKeyQueryParams []string          `yaml:"cache_key_query_params"`
-	MatchQueryParams    map[string]string `yaml:"match_query_params"`
+	Path                  string              `yaml:"path"`
+	PathRegex             string              `yaml:"path_regex"`
+	Methods               []string            `yaml:"methods"`
+	TTL                   time.Duration       `yaml:"ttl"`
+	CacheKeyHeaders       []string            `yaml:"cache_key_headers"`
+	CacheKeyQueryParams   []string            `yaml:"cache_key_query_params"`
+	MatchQueryParams      map[string][]string `yaml:"match_query_params"`
+	MatchQueryParamsRegex map[string][]string `yaml:"match_query_params_regex"`
 
 	// Compiled regex pattern (not serialized)
-	compiledRegex           *regexp.Regexp            `yaml:"-"`
-	compiledQueryParamRegex map[string]*regexp.Regexp `yaml:"-"`
+	compiledRegex           *regexp.Regexp              `yaml:"-"`
+	compiledQueryParamRegex map[string][]*regexp.Regexp `yaml:"-"`
 }
 
 type RateLimitConfig struct {
@@ -152,14 +153,16 @@ func (c *Config) compileRegexPatterns() error {
 		}
 
 		// Compile query param regex patterns
-		if len(ep.MatchQueryParams) > 0 {
-			ep.compiledQueryParamRegex = make(map[string]*regexp.Regexp)
-			for param, pattern := range ep.MatchQueryParams {
-				regex, err := regexp.Compile(pattern)
-				if err != nil {
-					return fmt.Errorf("invalid query param regex pattern for param %q: %w", param, err)
+		if len(ep.MatchQueryParamsRegex) > 0 {
+			ep.compiledQueryParamRegex = make(map[string][]*regexp.Regexp)
+			for param, patterns := range ep.MatchQueryParamsRegex {
+				for _, pattern := range patterns {
+					regex, err := regexp.Compile(pattern)
+					if err != nil {
+						return fmt.Errorf("invalid query param regex pattern for param %q: %w", param, err)
+					}
+					ep.compiledQueryParamRegex[param] = append(ep.compiledQueryParamRegex[param], regex)
 				}
-				ep.compiledQueryParamRegex[param] = regex
 			}
 		}
 	}
@@ -213,7 +216,8 @@ func (c *Config) GetEndpointCacheConfig(path, method string, queryParams map[str
 		}
 
 		// If no query param matching configured, this is a potential fallback
-		if len(ep.compiledQueryParamRegex) == 0 {
+		hasQueryParamMatching := len(ep.MatchQueryParams) > 0 || len(ep.compiledQueryParamRegex) > 0
+		if !hasQueryParamMatching {
 			if fallbackMatch == nil {
 				fallbackMatch = ep
 			}
@@ -222,15 +226,46 @@ func (c *Config) GetEndpointCacheConfig(path, method string, queryParams map[str
 
 		// Check query param matching - all configured params must match
 		allParamsMatch := true
-		for param, regex := range ep.compiledQueryParamRegex {
+
+		// Check exact match params
+		for param, allowedValues := range ep.MatchQueryParams {
 			values, exists := queryParams[param]
 			if !exists || len(values) == 0 {
 				allParamsMatch = false
 				break
 			}
-			if !regex.MatchString(values[0]) {
+			matched := false
+			for _, v := range allowedValues {
+				if v == values[0] {
+					matched = true
+					break
+				}
+			}
+			if !matched {
 				allParamsMatch = false
 				break
+			}
+		}
+
+		// Check regex match params
+		if allParamsMatch {
+			for param, regexList := range ep.compiledQueryParamRegex {
+				values, exists := queryParams[param]
+				if !exists || len(values) == 0 {
+					allParamsMatch = false
+					break
+				}
+				matched := false
+				for _, regex := range regexList {
+					if regex.MatchString(values[0]) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					allParamsMatch = false
+					break
+				}
 			}
 		}
 

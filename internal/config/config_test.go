@@ -207,7 +207,7 @@ func TestCompileRegexPatterns_InvalidRegex(t *testing.T) {
 	}
 }
 
-func TestGetEndpointCacheConfig_QueryParamMatch(t *testing.T) {
+func TestGetEndpointCacheConfig_QueryParamExactMatch(t *testing.T) {
 	cfg := &Config{
 		Cache: CacheConfig{
 			Endpoints: []EndpointCacheConfig{
@@ -215,19 +215,13 @@ func TestGetEndpointCacheConfig_QueryParamMatch(t *testing.T) {
 					Path:             "/query",
 					Methods:          []string{"GET"},
 					TTL:              24 * time.Hour,
-					MatchQueryParams: map[string]string{"function": "^EOD$"},
-					compiledQueryParamRegex: map[string]*regexp.Regexp{
-						"function": regexp.MustCompile("^EOD$"),
-					},
+					MatchQueryParams: map[string][]string{"function": {"EOD", "WEEKLY", "MONTHLY"}},
 				},
 				{
 					Path:             "/query",
 					Methods:          []string{"GET"},
 					TTL:              5 * time.Minute,
-					MatchQueryParams: map[string]string{"function": "^INTRADAY$"},
-					compiledQueryParamRegex: map[string]*regexp.Regexp{
-						"function": regexp.MustCompile("^INTRADAY$"),
-					},
+					MatchQueryParams: map[string][]string{"function": {"INTRADAY"}},
 				},
 				{
 					Path:    "/query",
@@ -249,6 +243,12 @@ func TestGetEndpointCacheConfig_QueryParamMatch(t *testing.T) {
 			queryParams: map[string][]string{"function": {"EOD"}},
 			expectedTTL: 24 * time.Hour,
 			description: "should match EOD endpoint with 24h TTL",
+		},
+		{
+			name:        "WEEKLY function",
+			queryParams: map[string][]string{"function": {"WEEKLY"}},
+			expectedTTL: 24 * time.Hour,
+			description: "should match WEEKLY in same list as EOD",
 		},
 		{
 			name:        "INTRADAY function",
@@ -294,12 +294,12 @@ func TestGetEndpointCacheConfig_QueryParamRegexMatch(t *testing.T) {
 		Cache: CacheConfig{
 			Endpoints: []EndpointCacheConfig{
 				{
-					Path:             "/api/data",
-					Methods:          []string{"GET"},
-					TTL:              10 * time.Minute,
-					MatchQueryParams: map[string]string{"type": "^(daily|weekly)$"},
-					compiledQueryParamRegex: map[string]*regexp.Regexp{
-						"type": regexp.MustCompile("^(daily|weekly)$"),
+					Path:                  "/api/data",
+					Methods:               []string{"GET"},
+					TTL:                   10 * time.Minute,
+					MatchQueryParamsRegex: map[string][]string{"type": {"^daily$", "^weekly$"}},
+					compiledQueryParamRegex: map[string][]*regexp.Regexp{
+						"type": {regexp.MustCompile("^daily$"), regexp.MustCompile("^weekly$")},
 					},
 				},
 			},
@@ -330,18 +330,18 @@ func TestGetEndpointCacheConfig_QueryParamRegexMatch(t *testing.T) {
 	}
 }
 
-func TestGetEndpointCacheConfig_MultipleQueryParams(t *testing.T) {
+func TestGetEndpointCacheConfig_MixedExactAndRegex(t *testing.T) {
 	cfg := &Config{
 		Cache: CacheConfig{
 			Endpoints: []EndpointCacheConfig{
 				{
-					Path:             "/api/report",
-					Methods:          []string{"GET"},
-					TTL:              30 * time.Minute,
-					MatchQueryParams: map[string]string{"type": "^summary$", "format": "^json$"},
-					compiledQueryParamRegex: map[string]*regexp.Regexp{
-						"type":   regexp.MustCompile("^summary$"),
-						"format": regexp.MustCompile("^json$"),
+					Path:                  "/api/report",
+					Methods:               []string{"GET"},
+					TTL:                   30 * time.Minute,
+					MatchQueryParams:      map[string][]string{"format": {"json", "xml"}},
+					MatchQueryParamsRegex: map[string][]string{"type": {"^summary.*$"}},
+					compiledQueryParamRegex: map[string][]*regexp.Regexp{
+						"type": {regexp.MustCompile("^summary.*$")},
 					},
 				},
 			},
@@ -354,23 +354,23 @@ func TestGetEndpointCacheConfig_MultipleQueryParams(t *testing.T) {
 		shouldMatch bool
 	}{
 		{
-			name:        "both params match",
-			queryParams: map[string][]string{"type": {"summary"}, "format": {"json"}},
+			name:        "both match",
+			queryParams: map[string][]string{"format": {"json"}, "type": {"summary-v2"}},
 			shouldMatch: true,
 		},
 		{
-			name:        "only type matches",
-			queryParams: map[string][]string{"type": {"summary"}, "format": {"xml"}},
+			name:        "exact matches but regex fails",
+			queryParams: map[string][]string{"format": {"json"}, "type": {"detailed"}},
 			shouldMatch: false,
 		},
 		{
-			name:        "only format matches",
-			queryParams: map[string][]string{"type": {"detailed"}, "format": {"json"}},
+			name:        "regex matches but exact fails",
+			queryParams: map[string][]string{"format": {"csv"}, "type": {"summary"}},
 			shouldMatch: false,
 		},
 		{
-			name:        "missing format param",
-			queryParams: map[string][]string{"type": {"summary"}},
+			name:        "missing regex param",
+			queryParams: map[string][]string{"format": {"json"}},
 			shouldMatch: false,
 		},
 	}
@@ -393,9 +393,9 @@ func TestCompileRegexPatterns_QueryParamRegex(t *testing.T) {
 		Cache: CacheConfig{
 			Endpoints: []EndpointCacheConfig{
 				{
-					Path:             "/query",
-					Methods:          []string{"GET"},
-					MatchQueryParams: map[string]string{"function": "^(EOD|INTRADAY)$"},
+					Path:                  "/query",
+					Methods:               []string{"GET"},
+					MatchQueryParamsRegex: map[string][]string{"function": {"^EOD$", "^INTRADAY$"}},
 				},
 			},
 		},
@@ -410,8 +410,9 @@ func TestCompileRegexPatterns_QueryParamRegex(t *testing.T) {
 		t.Error("Query param regex map not initialized")
 	}
 
-	if cfg.Cache.Endpoints[0].compiledQueryParamRegex["function"] == nil {
-		t.Error("Query param regex for 'function' not compiled")
+	regexList := cfg.Cache.Endpoints[0].compiledQueryParamRegex["function"]
+	if len(regexList) != 2 {
+		t.Errorf("Expected 2 compiled regexes for 'function', got %d", len(regexList))
 	}
 }
 
@@ -420,9 +421,9 @@ func TestCompileRegexPatterns_InvalidQueryParamRegex(t *testing.T) {
 		Cache: CacheConfig{
 			Endpoints: []EndpointCacheConfig{
 				{
-					Path:             "/query",
-					Methods:          []string{"GET"},
-					MatchQueryParams: map[string]string{"function": "[invalid(regex"},
+					Path:                  "/query",
+					Methods:               []string{"GET"},
+					MatchQueryParamsRegex: map[string][]string{"function": {"[invalid(regex"}},
 				},
 			},
 		},
