@@ -147,6 +147,31 @@ cache:
       methods: ["GET"]
       ttl: 900s
       cache_key_headers: ["Authorization"]
+
+    # Query param matching - different TTLs for same path based on query params
+    - path: "/query"
+      methods: ["GET"]
+      ttl: 86400s  # 24h for EOD data
+      match_query_params:
+        function: ["EOD", "WEEKLY", "MONTHLY"]
+
+    - path: "/query"
+      methods: ["GET"]
+      ttl: 300s  # 5m for intraday data
+      match_query_params:
+        function: ["INTRADAY"]
+
+    # Regex query param matching
+    - path: "/query"
+      methods: ["GET"]
+      ttl: 600s
+      match_query_params_regex:
+        function: ["^REALTIME.*$", "^STREAM.*$"]
+
+    # Fallback for /query with no specific match
+    - path: "/query"
+      methods: ["GET"]
+      ttl: 3600s
 ```
 
 **Endpoint Matching**:
@@ -154,6 +179,13 @@ cache:
 - Exact path matches are checked first, then regex patterns
 - If no endpoint matches, `default_ttl` is used
 - Only GET requests are cached by default
+
+**Query Param Matching**:
+- `match_query_params`: exact match against a list of allowed values
+- `match_query_params_regex`: regex match against a list of patterns
+- Both can be used on the same endpoint (all must match)
+- Endpoints with query param matching take precedence over those without
+- Endpoints without query param matching serve as fallbacks for the same path
 
 **Cache Key Generation**: The proxy generates cache keys based on:
 - HTTP method
@@ -244,10 +276,11 @@ path_regex: "^/static/.*\\.(png|jpg|css|js)$"
 
 ### Matching Priority
 
-1. **Exact path match** is checked first
-2. **Regex patterns** are checked in order of definition
-3. **First match wins** - subsequent patterns are not evaluated
-4. **No match** - uses default settings (default_ttl for cache, global rate limit)
+1. **Path + query param match** - endpoints with `match_query_params` or `match_query_params_regex` are checked first
+2. **Path-only match (fallback)** - endpoints without query param matching serve as fallbacks
+3. Within path matching: **exact path** is checked before **regex patterns**
+4. **First match wins** - subsequent patterns are not evaluated
+5. **No match** - uses default settings (default_ttl for cache, global rate limit)
 
 ### Tips
 
@@ -255,6 +288,7 @@ path_regex: "^/static/.*\\.(png|jpg|css|js)$"
 - Test your regex patterns before deploying
 - More specific patterns should be defined before general ones
 - Exact paths are faster than regex - use them when possible
+- Define a fallback endpoint (without `match_query_params`) for paths that use query param matching
 
 ## API Endpoints
 

@@ -50,8 +50,8 @@ cmd/api-cache/main.go        # Entrypoint: config loading, server setup, gracefu
 internal/
   cache/cache.go              # Valkey client, cache key generation, get/set/delete
   cache/cache_test.go         # Unit tests for cache key generation
-  config/config.go            # YAML config loading, validation, regex compilation
-  config/config_test.go       # Unit tests for endpoint matching (exact + regex)
+  config/config.go            # YAML config loading, validation, regex compilation, query param matching
+  config/config_test.go       # Unit tests for endpoint matching (exact, regex, query param)
   logger/logger.go            # Global logrus logger initialization + helpers
   middleware/ratelimit.go     # Per-path rate limiting middleware (golang.org/x/time/rate)
   proxy/proxy.go              # HTTP handler: cache lookup, upstream forwarding, retry logic
@@ -149,6 +149,10 @@ import (
 - YAML-based config files (`config.yaml`, `config.docker.yaml`)
 - Config loaded once at startup via `config.Load(path)`
 - Regex patterns in config are compiled at load time and stored as unexported `compiledRegex` fields
+- Query param matching supports two modes:
+  - `match_query_params` (`map[string][]string`): exact match against a list of allowed values
+  - `match_query_params_regex` (`map[string][]string`): regex match against a list of patterns, compiled at load time into `compiledQueryParamRegex`
+- Endpoints with query param matching take precedence; endpoints without serve as fallbacks
 - Validation runs at load time; fail fast on invalid config
 
 ### Dependencies
