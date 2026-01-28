@@ -61,7 +61,7 @@ upstream:
   max_conns_per_host: 10
 
 logging:
-  level: "info"  # debug, info, warn, error
+  level: "debug"  # debug, info, warn, error
   format: "json"  # json, text
   output: "stdout"  # stdout, stderr, file
   file_path: "/var/log/api-cache.log"

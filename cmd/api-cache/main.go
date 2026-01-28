@@ -55,11 +55,14 @@ func main() {
 	mux.HandleFunc("/health", proxyHandler.Health())
 	mux.Handle("/", rateLimiter.Middleware(cfg)(proxyHandler))
 
+	// Wrap with request ID middleware
+	handler := middleware.RequestID(mux)
+
 	// Create HTTP server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
