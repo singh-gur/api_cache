@@ -44,15 +44,17 @@ type CacheConfig struct {
 }
 
 type EndpointCacheConfig struct {
-	Path                string        `yaml:"path"`
-	PathRegex           string        `yaml:"path_regex"`
-	Methods             []string      `yaml:"methods"`
-	TTL                 time.Duration `yaml:"ttl"`
-	CacheKeyHeaders     []string      `yaml:"cache_key_headers"`
-	CacheKeyQueryParams []string      `yaml:"cache_key_query_params"`
+	Path                string            `yaml:"path"`
+	PathRegex           string            `yaml:"path_regex"`
+	Methods             []string          `yaml:"methods"`
+	TTL                 time.Duration     `yaml:"ttl"`
+	CacheKeyHeaders     []string          `yaml:"cache_key_headers"`
+	CacheKeyQueryParams []string          `yaml:"cache_key_query_params"`
+	MatchQueryParams    map[string]string `yaml:"match_query_params"`
 
 	// Compiled regex pattern (not serialized)
-	compiledRegex *regexp.Regexp `yaml:"-"`
+	compiledRegex           *regexp.Regexp            `yaml:"-"`
+	compiledQueryParamRegex map[string]*regexp.Regexp `yaml:"-"`
 }
 
 type RateLimitConfig struct {
@@ -148,6 +150,18 @@ func (c *Config) compileRegexPatterns() error {
 			}
 			ep.compiledRegex = regex
 		}
+
+		// Compile query param regex patterns
+		if len(ep.MatchQueryParams) > 0 {
+			ep.compiledQueryParamRegex = make(map[string]*regexp.Regexp)
+			for param, pattern := range ep.MatchQueryParams {
+				regex, err := regexp.Compile(pattern)
+				if err != nil {
+					return fmt.Errorf("invalid query param regex pattern for param %q: %w", param, err)
+				}
+				ep.compiledQueryParamRegex[param] = regex
+			}
+		}
 	}
 
 	// Compile rate limit endpoint patterns
@@ -167,7 +181,10 @@ func (c *Config) compileRegexPatterns() error {
 
 // GetEndpointCacheConfig returns the cache configuration for a specific endpoint
 // Supports both exact path matching and regex patterns
-func (c *Config) GetEndpointCacheConfig(path, method string) *EndpointCacheConfig {
+// Query params with match_query_params take precedence over endpoints without
+func (c *Config) GetEndpointCacheConfig(path, method string, queryParams map[string][]string) *EndpointCacheConfig {
+	var fallbackMatch *EndpointCacheConfig
+
 	for i := range c.Cache.Endpoints {
 		ep := &c.Cache.Endpoints[i]
 
@@ -183,17 +200,46 @@ func (c *Config) GetEndpointCacheConfig(path, method string) *EndpointCacheConfi
 			continue
 		}
 
-		// Check exact path match first
+		// Check path match (exact or regex)
+		pathMatches := false
 		if ep.Path != "" && ep.Path == path {
-			return ep
+			pathMatches = true
+		} else if ep.compiledRegex != nil && ep.compiledRegex.MatchString(path) {
+			pathMatches = true
 		}
 
-		// Check regex match
-		if ep.compiledRegex != nil && ep.compiledRegex.MatchString(path) {
+		if !pathMatches {
+			continue
+		}
+
+		// If no query param matching configured, this is a potential fallback
+		if len(ep.compiledQueryParamRegex) == 0 {
+			if fallbackMatch == nil {
+				fallbackMatch = ep
+			}
+			continue
+		}
+
+		// Check query param matching - all configured params must match
+		allParamsMatch := true
+		for param, regex := range ep.compiledQueryParamRegex {
+			values, exists := queryParams[param]
+			if !exists || len(values) == 0 {
+				allParamsMatch = false
+				break
+			}
+			if !regex.MatchString(values[0]) {
+				allParamsMatch = false
+				break
+			}
+		}
+
+		if allParamsMatch {
 			return ep
 		}
 	}
-	return nil
+
+	return fallbackMatch
 }
 
 // GetEndpointRateLimitConfig returns the rate limit configuration for a specific endpoint

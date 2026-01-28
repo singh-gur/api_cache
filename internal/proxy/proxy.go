@@ -47,7 +47,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get endpoint-specific cache config
-	endpointConfig := h.config.GetEndpointCacheConfig(r.URL.Path, r.Method)
+	endpointConfig := h.config.GetEndpointCacheConfig(r.URL.Path, r.Method, r.URL.Query())
 
 	// Generate cache key
 	cacheKey := h.cache.GenerateCacheKey(r, endpointConfig)
@@ -121,7 +121,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 			CachedAt:   time.Now(),
 		}
 
-		ttl := h.cache.GetTTL(r.URL.Path, r.Method)
+		ttl := h.getTTL(endpointConfig)
 		if err := h.cache.Set(ctx, cacheKey, cachedResp, ttl); err != nil {
 			logger.WithField("error", err).Error("Failed to cache response")
 		}
@@ -258,6 +258,14 @@ func (h *Handler) isRetryableStatus(statusCode int) bool {
 		}
 	}
 	return false
+}
+
+// getTTL returns the TTL from endpoint config or falls back to default
+func (h *Handler) getTTL(endpointConfig *config.EndpointCacheConfig) time.Duration {
+	if endpointConfig != nil && endpointConfig.TTL > 0 {
+		return endpointConfig.TTL
+	}
+	return h.config.Cache.DefaultTTL
 }
 
 // Health returns a health check handler

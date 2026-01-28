@@ -162,8 +162,8 @@ func (c *Client) Close() error {
 }
 
 // GetTTL returns the TTL for a specific endpoint or the default TTL
-func (c *Client) GetTTL(path, method string) time.Duration {
-	if endpointConfig := c.config.GetEndpointCacheConfig(path, method); endpointConfig != nil {
+func (c *Client) GetTTL(path, method string, queryParams map[string][]string) time.Duration {
+	if endpointConfig := c.config.GetEndpointCacheConfig(path, method, queryParams); endpointConfig != nil {
 		return endpointConfig.TTL
 	}
 	return c.config.Cache.DefaultTTL
