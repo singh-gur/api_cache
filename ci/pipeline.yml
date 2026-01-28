@@ -11,6 +11,7 @@ resources:
       branch: main
       username: ((github_username))
       password: ((github_token))
+      fetch_tags: true
 
   - name: docker-image
     type: registry-image
