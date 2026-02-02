@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -182,33 +183,68 @@ func (c *Config) compileRegexPatterns() error {
 	return nil
 }
 
+// EndpointIdentifier returns a human-readable string identifying the endpoint config.
+// Useful for logging which config entry matched a request.
+func (ep *EndpointCacheConfig) EndpointIdentifier() string {
+	if ep.Path != "" {
+		return ep.Path
+	}
+	if ep.PathRegex != "" {
+		return "regex:" + ep.PathRegex
+	}
+	return "<unknown>"
+}
+
+// MatchType describes how a request path matched this endpoint config.
+type MatchType string
+
+const (
+	MatchTypeExact         MatchType = "exact"
+	MatchTypeRegex         MatchType = "regex"
+	MatchTypeQueryParam    MatchType = "query_param"
+	MatchTypeFallbackExact MatchType = "fallback_exact"
+	MatchTypeFallbackRegex MatchType = "fallback_regex"
+	MatchTypeDefault       MatchType = "default"
+)
+
+// EndpointMatch holds the result of endpoint config resolution, including
+// how the match was made for debugging purposes.
+type EndpointMatch struct {
+	Config    *EndpointCacheConfig
+	MatchType MatchType
+}
+
 // GetEndpointCacheConfig returns the cache configuration for a specific endpoint
 // Supports both exact path matching and regex patterns
 // Query params with match_query_params take precedence over endpoints without
 func (c *Config) GetEndpointCacheConfig(path, method string, queryParams map[string][]string) *EndpointCacheConfig {
+	match := c.GetEndpointCacheConfigMatch(path, method, queryParams)
+	return match.Config
+}
+
+// GetEndpointCacheConfigMatch returns the cache configuration and match metadata
+// for a specific endpoint. The MatchType field describes how the endpoint was resolved.
+func (c *Config) GetEndpointCacheConfigMatch(path, method string, queryParams map[string][]string) EndpointMatch {
 	var fallbackMatch *EndpointCacheConfig
+	var fallbackMatchType MatchType
 
 	for i := range c.Cache.Endpoints {
 		ep := &c.Cache.Endpoints[i]
 
 		// Check if method matches
-		methodMatches := false
-		for _, m := range ep.Methods {
-			if m == method {
-				methodMatches = true
-				break
-			}
-		}
-		if !methodMatches {
+		if !slices.Contains(ep.Methods, method) {
 			continue
 		}
 
 		// Check path match (exact or regex)
 		pathMatches := false
+		pathMatchType := MatchTypeExact
 		if ep.Path != "" && ep.Path == path {
 			pathMatches = true
+			pathMatchType = MatchTypeExact
 		} else if ep.compiledRegex != nil && ep.compiledRegex.MatchString(path) {
 			pathMatches = true
+			pathMatchType = MatchTypeRegex
 		}
 
 		if !pathMatches {
@@ -220,6 +256,7 @@ func (c *Config) GetEndpointCacheConfig(path, method string, queryParams map[str
 		if !hasQueryParamMatching {
 			if fallbackMatch == nil {
 				fallbackMatch = ep
+				fallbackMatchType = pathMatchType
 			}
 			continue
 		}
@@ -270,11 +307,19 @@ func (c *Config) GetEndpointCacheConfig(path, method string, queryParams map[str
 		}
 
 		if allParamsMatch {
-			return ep
+			return EndpointMatch{Config: ep, MatchType: MatchTypeQueryParam}
 		}
 	}
 
-	return fallbackMatch
+	if fallbackMatch != nil {
+		matchType := MatchTypeFallbackExact
+		if fallbackMatchType == MatchTypeRegex {
+			matchType = MatchTypeFallbackRegex
+		}
+		return EndpointMatch{Config: fallbackMatch, MatchType: matchType}
+	}
+
+	return EndpointMatch{Config: nil, MatchType: MatchTypeDefault}
 }
 
 // GetEndpointRateLimitConfig returns the rate limit configuration for a specific endpoint

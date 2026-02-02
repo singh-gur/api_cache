@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
+
 	"github.com/singh-gur/api_cache/internal/config"
 	"github.com/singh-gur/api_cache/internal/logger"
 )
@@ -101,6 +103,10 @@ func (c *Client) Get(ctx context.Context, key string) (*CachedResponse, error) {
 	data, err := c.redis.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
+			// Check remaining TTL for debugging (key doesn't exist)
+			logger.WithFields(map[string]interface{}{
+				"cache_key": key,
+			}).Debug("Cache miss (key not found in store)")
 			return nil, nil // Cache miss
 		}
 		return nil, fmt.Errorf("failed to get cache: %w", err)
@@ -111,7 +117,18 @@ func (c *Client) Get(ctx context.Context, key string) (*CachedResponse, error) {
 		return nil, fmt.Errorf("failed to unmarshal cached response: %w", err)
 	}
 
-	logger.WithField("cache_key", key).Debug("Cache hit")
+	logFields := map[string]interface{}{
+		"cache_key": key,
+	}
+	// Only pay the extra Valkey RTT for remaining TTL when debug logging is active
+	if logger.Log.IsLevelEnabled(logrus.DebugLevel) {
+		logFields["cache_age"] = time.Since(cached.CachedAt).Seconds()
+		logFields["cached_at"] = cached.CachedAt.Format(time.RFC3339)
+		if remainingTTL, err := c.redis.TTL(ctx, key).Result(); err == nil {
+			logFields["remaining_ttl"] = remainingTTL.Seconds()
+		}
+	}
+	logger.WithFields(logFields).Debug("Cache hit")
 	return &cached, nil
 }
 
@@ -127,8 +144,10 @@ func (c *Client) Set(ctx context.Context, key string, response *CachedResponse, 
 	}
 
 	logger.WithFields(map[string]interface{}{
-		"cache_key": key,
-		"ttl":       ttl.Seconds(),
+		"cache_key":  key,
+		"ttl":        ttl.Seconds(),
+		"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
+		"body_size":  len(response.Body),
 	}).Debug("Cached response")
 
 	return nil

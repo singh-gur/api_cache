@@ -36,6 +36,24 @@ func NewHandler(cacheClient *cache.Client, cfg *config.Config) *Handler {
 	}
 }
 
+// endpointLogFields returns structured log fields describing the matched endpoint config.
+func endpointLogFields(match config.EndpointMatch) map[string]interface{} {
+	fields := map[string]interface{}{
+		"endpoint_match_type": string(match.MatchType),
+	}
+	if match.Config != nil {
+		fields["endpoint_id"] = match.Config.EndpointIdentifier()
+		fields["endpoint_ttl"] = match.Config.TTL.Seconds()
+		if len(match.Config.CacheKeyQueryParams) > 0 {
+			fields["cache_key_query_params"] = match.Config.CacheKeyQueryParams
+		}
+		if len(match.Config.CacheKeyHeaders) > 0 {
+			fields["cache_key_headers"] = match.Config.CacheKeyHeaders
+		}
+	}
+	return fields
+}
+
 // ServeHTTP handles incoming requests with caching
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
@@ -63,29 +81,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get endpoint-specific cache config
-	endpointConfig := h.config.GetEndpointCacheConfig(r.URL.Path, r.Method, r.URL.Query())
+	// Get endpoint-specific cache config with match metadata
+	match := h.config.GetEndpointCacheConfigMatch(r.URL.Path, r.Method, r.URL.Query())
+	endpointConfig := match.Config
 
 	// Generate cache key
 	cacheKey := h.cache.GenerateCacheKey(r, endpointConfig)
+
+	// Determine effective TTL
+	ttl := h.getTTL(endpointConfig)
 
 	// Log cache key and endpoint config details
 	logFields := map[string]interface{}{
 		"request_id": requestID,
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
 		"method":     r.Method,
+		"ttl":        ttl.Seconds(),
 	}
-	if endpointConfig != nil {
-		logFields["ttl"] = endpointConfig.TTL.Seconds()
-		if len(endpointConfig.CacheKeyQueryParams) > 0 {
-			logFields["cache_key_query_params"] = endpointConfig.CacheKeyQueryParams
-		}
-		if len(endpointConfig.CacheKeyHeaders) > 0 {
-			logFields["cache_key_headers"] = endpointConfig.CacheKeyHeaders
-		}
-	} else {
-		logFields["ttl"] = h.config.Cache.DefaultTTL.Seconds()
+	for k, v := range endpointLogFields(match) {
+		logFields[k] = v
 	}
 	logger.WithFields(logFields).Debug("Cache key generated")
 
@@ -96,26 +112,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"request_id": requestID,
 			"error":      err,
 			"cache_key":  cacheKey,
+			"path":       r.URL.Path,
+			"query":      r.URL.RawQuery,
 		}).Error("Failed to get from cache")
 	}
 
 	if cached != nil {
 		// Serve from cache
-		h.serveCachedResponse(w, cached, cacheKey, requestID, startTime)
+		h.serveCachedResponse(w, r, cached, cacheKey, match, requestID, startTime)
 		return
 	}
 
 	logger.WithFields(map[string]interface{}{
 		"request_id": requestID,
 		"cache_key":  cacheKey,
+		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
+		"ttl":        ttl.Seconds(),
 	}).Debug("Cache miss")
 
 	// Cache miss - forward request to upstream
-	h.forwardAndCache(w, r, ctx, cacheKey, endpointConfig, requestID, startTime)
+	h.forwardAndCache(w, r, ctx, cacheKey, endpointConfig, match, requestID, startTime)
 }
 
 // serveCachedResponse writes a cached response to the client
-func (h *Handler) serveCachedResponse(w http.ResponseWriter, cached *cache.CachedResponse, cacheKey string, requestID string, startTime time.Time) {
+func (h *Handler) serveCachedResponse(w http.ResponseWriter, r *http.Request, cached *cache.CachedResponse, cacheKey string, match config.EndpointMatch, requestID string, startTime time.Time) {
 	// Copy headers
 	for key, values := range cached.Headers {
 		for _, value := range values {
@@ -133,24 +154,31 @@ func (h *Handler) serveCachedResponse(w http.ResponseWriter, cached *cache.Cache
 
 	duration := time.Since(startTime)
 	cacheAge := time.Since(cached.CachedAt)
-	logger.WithFields(map[string]interface{}{
+	logFields := map[string]interface{}{
 		"request_id": requestID,
 		"cache":      "hit",
 		"cache_key":  cacheKey,
+		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
 		"status":     cached.StatusCode,
 		"duration":   duration.Milliseconds(),
 		"cache_age":  cacheAge.Seconds(),
 		"body_size":  len(cached.Body),
 		"cached_at":  cached.CachedAt.Format(time.RFC3339),
-	}).Info("Request served from cache")
+	}
+	for k, v := range endpointLogFields(match) {
+		logFields[k] = v
+	}
+	logger.WithFields(logFields).Info("Request served from cache")
 }
 
 // forwardAndCache forwards the request to upstream and caches the response
-func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx context.Context, cacheKey string, endpointConfig *config.EndpointCacheConfig, requestID string, startTime time.Time) {
+func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx context.Context, cacheKey string, endpointConfig *config.EndpointCacheConfig, match config.EndpointMatch, requestID string, startTime time.Time) {
 	logger.WithFields(map[string]interface{}{
 		"request_id": requestID,
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
 		"method":     r.Method,
 	}).Debug("Forwarding request to upstream")
 
@@ -162,6 +190,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 			"error":      err,
 			"cache_key":  cacheKey,
 			"path":       r.URL.Path,
+			"query":      r.URL.RawQuery,
 		}).Error("Failed to forward request")
 		http.Error(w, "upstream service unavailable", http.StatusBadGateway)
 		return
@@ -175,13 +204,15 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 			"request_id": requestID,
 			"error":      err,
 			"cache_key":  cacheKey,
+			"path":       r.URL.Path,
 		}).Error("Failed to read response body")
 		http.Error(w, "failed to read upstream response", http.StatusInternalServerError)
 		return
 	}
 
 	// Cache successful responses (2xx status codes)
-	cached := false
+	wasCached := false
+	ttl := h.getTTL(endpointConfig)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		cachedResp := &cache.CachedResponse{
 			StatusCode: resp.StatusCode,
@@ -190,26 +221,35 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 			CachedAt:   time.Now(),
 		}
 
-		ttl := h.getTTL(endpointConfig)
 		if err := h.cache.Set(ctx, cacheKey, cachedResp, ttl); err != nil {
 			logger.WithFields(map[string]interface{}{
 				"request_id": requestID,
 				"error":      err,
 				"cache_key":  cacheKey,
+				"path":       r.URL.Path,
+				"query":      r.URL.RawQuery,
 			}).Error("Failed to cache response")
 		} else {
-			cached = true
-			logger.WithFields(map[string]interface{}{
+			wasCached = true
+			logFields := map[string]interface{}{
 				"request_id": requestID,
 				"cache_key":  cacheKey,
+				"path":       r.URL.Path,
+				"query":      r.URL.RawQuery,
 				"ttl":        ttl.Seconds(),
 				"body_size":  len(body),
-			}).Debug("Response cached successfully")
+			}
+			for k, v := range endpointLogFields(match) {
+				logFields[k] = v
+			}
+			logger.WithFields(logFields).Debug("Response cached successfully")
 		}
 	} else {
 		logger.WithFields(map[string]interface{}{
 			"request_id": requestID,
 			"cache_key":  cacheKey,
+			"path":       r.URL.Path,
+			"query":      r.URL.RawQuery,
 			"status":     resp.StatusCode,
 		}).Debug("Response not cached (non-2xx status)")
 	}
@@ -229,15 +269,22 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 	w.Write(body)
 
 	duration := time.Since(startTime)
-	logger.WithFields(map[string]interface{}{
+	logFields := map[string]interface{}{
 		"request_id": requestID,
 		"cache":      "miss",
 		"cache_key":  cacheKey,
+		"path":       r.URL.Path,
+		"query":      r.URL.RawQuery,
 		"status":     resp.StatusCode,
 		"duration":   duration.Milliseconds(),
 		"body_size":  len(body),
-		"cached":     cached,
-	}).Info("Request forwarded to upstream")
+		"cached":     wasCached,
+		"ttl":        ttl.Seconds(),
+	}
+	for k, v := range endpointLogFields(match) {
+		logFields[k] = v
+	}
+	logger.WithFields(logFields).Info("Request forwarded to upstream")
 }
 
 // forwardRequest forwards a non-cacheable request to upstream
