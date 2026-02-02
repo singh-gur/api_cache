@@ -122,12 +122,12 @@ jobs:
       - put: docker-image
         params:
           image: image/image.tar
-          additional_tags: repo/.git/short_ref
+          additional_tags: repo/.git/branch
 
       - put: docker-image-tagged
         params:
           image: image/image.tar
-          additional_tags: repo/.git/ref
+          additional_tags: repo/.git/short_ref
 
       - task: sign-image
         config:
@@ -154,19 +154,21 @@ jobs:
               - -euc
               - |
                 # Install cosign
-                apk add --no-cache cosign git
+                apk add --no-cache cosign
 
                 # Login to registry
                 cosign login regv2.gsingh.io -u "$REGISTRY_USERNAME" -p "$REGISTRY_PASSWORD"
 
-                # Get the commit SHA for tagging
-                cd repo
-                COMMIT_SHA=$(git rev-parse --short HEAD)
-                cd ..
+                # Read tags from git resource metadata
+                COMMIT_SHA=$(cat repo/.git/short_ref)
+                BRANCH=$(cat repo/.git/branch)
 
                 # Sign the images
                 echo "Signing image: ${IMAGE_REPO}:latest"
                 cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE_REPO}:latest" -y
+
+                echo "Signing image: ${IMAGE_REPO}:${BRANCH}"
+                cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE_REPO}:${BRANCH}" -y
 
                 echo "Signing image: ${IMAGE_REPO}:${COMMIT_SHA}"
                 cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE_REPO}:${COMMIT_SHA}" -y
