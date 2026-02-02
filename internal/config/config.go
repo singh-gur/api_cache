@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -93,10 +95,57 @@ type UpstreamConfig struct {
 }
 
 type LoggingConfig struct {
-	Level    string `yaml:"level"`
-	Format   string `yaml:"format"`
-	Output   string `yaml:"output"`
-	FilePath string `yaml:"file_path"`
+	Level             string   `yaml:"level"`
+	Format            string   `yaml:"format"`
+	Output            string   `yaml:"output"`
+	FilePath          string   `yaml:"file_path"`
+	RedactQueryParams []string `yaml:"redact_query_params"`
+}
+
+const redactedValue = "[REDACTED]"
+
+// SanitizeQuery returns a query string with sensitive parameter values replaced
+// by [REDACTED]. The list of parameters to redact is configured via
+// logging.redact_query_params. If the list is empty, the raw query is returned
+// unchanged.
+func (c *Config) SanitizeQuery(rawQuery string) string {
+	if len(c.Logging.RedactQueryParams) == 0 || rawQuery == "" {
+		return rawQuery
+	}
+
+	parsed, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return rawQuery
+	}
+
+	for _, param := range c.Logging.RedactQueryParams {
+		if _, exists := parsed[param]; exists {
+			parsed.Set(param, redactedValue)
+		}
+	}
+
+	// Rebuild query string preserving original parameter order.
+	// url.Values.Encode() sorts keys alphabetically which makes diffing
+	// against the original harder, so we rebuild manually.
+	var parts []string
+	seen := make(map[string]bool)
+
+	// Walk the original query to preserve key order
+	for rawQuery != "" {
+		var key string
+		key, rawQuery, _ = strings.Cut(rawQuery, "&")
+		paramName, _, _ := strings.Cut(key, "=")
+		paramName, _ = url.QueryUnescape(paramName)
+		if seen[paramName] {
+			continue
+		}
+		seen[paramName] = true
+		for _, v := range parsed[paramName] {
+			parts = append(parts, url.QueryEscape(paramName)+"="+url.QueryEscape(v))
+		}
+	}
+
+	return strings.Join(parts, "&")
 }
 
 // Load reads and parses the configuration file

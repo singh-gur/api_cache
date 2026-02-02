@@ -36,6 +36,11 @@ func NewHandler(cacheClient *cache.Client, cfg *config.Config) *Handler {
 	}
 }
 
+// sanitizeQuery returns the request query string with sensitive params redacted.
+func (h *Handler) sanitizeQuery(r *http.Request) string {
+	return h.config.SanitizeQuery(r.URL.RawQuery)
+}
+
 // endpointLogFields returns structured log fields describing the matched endpoint config.
 func endpointLogFields(match config.EndpointMatch) map[string]interface{} {
 	fields := map[string]interface{}{
@@ -60,12 +65,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := middleware.GetRequestID(ctx)
 
+	// Sanitize query string for logging (redacts sensitive params like apikey)
+	safeQuery := h.sanitizeQuery(r)
+
 	// Log incoming request
 	logger.WithFields(map[string]interface{}{
 		"request_id":  requestID,
 		"method":      r.Method,
 		"path":        r.URL.Path,
-		"query":       r.URL.RawQuery,
+		"query":       safeQuery,
 		"remote_addr": r.RemoteAddr,
 		"user_agent":  r.Header.Get("User-Agent"),
 	}).Info("Incoming request")
@@ -96,7 +104,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"request_id": requestID,
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
+		"query":      safeQuery,
 		"method":     r.Method,
 		"ttl":        ttl.Seconds(),
 	}
@@ -113,7 +121,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"error":      err,
 			"cache_key":  cacheKey,
 			"path":       r.URL.Path,
-			"query":      r.URL.RawQuery,
+			"query":      safeQuery,
 		}).Error("Failed to get from cache")
 	}
 
@@ -127,7 +135,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"request_id": requestID,
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
+		"query":      safeQuery,
 		"ttl":        ttl.Seconds(),
 	}).Debug("Cache miss")
 
@@ -159,7 +167,7 @@ func (h *Handler) serveCachedResponse(w http.ResponseWriter, r *http.Request, ca
 		"cache":      "hit",
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
+		"query":      h.sanitizeQuery(r),
 		"status":     cached.StatusCode,
 		"duration":   duration.Milliseconds(),
 		"cache_age":  cacheAge.Seconds(),
@@ -174,11 +182,13 @@ func (h *Handler) serveCachedResponse(w http.ResponseWriter, r *http.Request, ca
 
 // forwardAndCache forwards the request to upstream and caches the response
 func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx context.Context, cacheKey string, endpointConfig *config.EndpointCacheConfig, match config.EndpointMatch, requestID string, startTime time.Time) {
+	safeQuery := h.sanitizeQuery(r)
+
 	logger.WithFields(map[string]interface{}{
 		"request_id": requestID,
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
+		"query":      safeQuery,
 		"method":     r.Method,
 	}).Debug("Forwarding request to upstream")
 
@@ -190,7 +200,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 			"error":      err,
 			"cache_key":  cacheKey,
 			"path":       r.URL.Path,
-			"query":      r.URL.RawQuery,
+			"query":      safeQuery,
 		}).Error("Failed to forward request")
 		http.Error(w, "upstream service unavailable", http.StatusBadGateway)
 		return
@@ -227,7 +237,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 				"error":      err,
 				"cache_key":  cacheKey,
 				"path":       r.URL.Path,
-				"query":      r.URL.RawQuery,
+				"query":      safeQuery,
 			}).Error("Failed to cache response")
 		} else {
 			wasCached = true
@@ -235,7 +245,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 				"request_id": requestID,
 				"cache_key":  cacheKey,
 				"path":       r.URL.Path,
-				"query":      r.URL.RawQuery,
+				"query":      safeQuery,
 				"ttl":        ttl.Seconds(),
 				"body_size":  len(body),
 			}
@@ -249,7 +259,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 			"request_id": requestID,
 			"cache_key":  cacheKey,
 			"path":       r.URL.Path,
-			"query":      r.URL.RawQuery,
+			"query":      safeQuery,
 			"status":     resp.StatusCode,
 		}).Debug("Response not cached (non-2xx status)")
 	}
@@ -274,7 +284,7 @@ func (h *Handler) forwardAndCache(w http.ResponseWriter, r *http.Request, ctx co
 		"cache":      "miss",
 		"cache_key":  cacheKey,
 		"path":       r.URL.Path,
-		"query":      r.URL.RawQuery,
+		"query":      safeQuery,
 		"status":     resp.StatusCode,
 		"duration":   duration.Milliseconds(),
 		"body_size":  len(body),

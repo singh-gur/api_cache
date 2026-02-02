@@ -434,3 +434,70 @@ func TestCompileRegexPatterns_InvalidQueryParamRegex(t *testing.T) {
 		t.Error("Expected error for invalid query param regex, got nil")
 	}
 }
+
+func TestSanitizeQuery(t *testing.T) {
+	tests := []struct {
+		name              string
+		redactQueryParams []string
+		rawQuery          string
+		expected          string
+	}{
+		{
+			name:              "redacts single param",
+			redactQueryParams: []string{"apikey"},
+			rawQuery:          "function=TIME_SERIES_DAILY&symbol=IBM&apikey=secret123",
+			expected:          "function=TIME_SERIES_DAILY&symbol=IBM&apikey=%5BREDACTED%5D",
+		},
+		{
+			name:              "redacts multiple params",
+			redactQueryParams: []string{"apikey", "token"},
+			rawQuery:          "apikey=secret&function=QUOTE&token=abc123",
+			expected:          "apikey=%5BREDACTED%5D&function=QUOTE&token=%5BREDACTED%5D",
+		},
+		{
+			name:              "no redaction when param not present",
+			redactQueryParams: []string{"apikey"},
+			rawQuery:          "function=TIME_SERIES_DAILY&symbol=IBM",
+			expected:          "function=TIME_SERIES_DAILY&symbol=IBM",
+		},
+		{
+			name:              "empty redact list returns raw query unchanged",
+			redactQueryParams: []string{},
+			rawQuery:          "function=QUOTE&apikey=secret",
+			expected:          "function=QUOTE&apikey=secret",
+		},
+		{
+			name:              "nil redact list returns raw query unchanged",
+			redactQueryParams: nil,
+			rawQuery:          "function=QUOTE&apikey=secret",
+			expected:          "function=QUOTE&apikey=secret",
+		},
+		{
+			name:              "empty query string",
+			redactQueryParams: []string{"apikey"},
+			rawQuery:          "",
+			expected:          "",
+		},
+		{
+			name:              "preserves parameter order",
+			redactQueryParams: []string{"apikey"},
+			rawQuery:          "symbol=IBM&apikey=secret&function=QUOTE",
+			expected:          "symbol=IBM&apikey=%5BREDACTED%5D&function=QUOTE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Logging: LoggingConfig{
+					RedactQueryParams: tt.redactQueryParams,
+				},
+			}
+
+			result := cfg.SanitizeQuery(tt.rawQuery)
+			if result != tt.expected {
+				t.Errorf("SanitizeQuery(%q) = %q, want %q", tt.rawQuery, result, tt.expected)
+			}
+		})
+	}
+}

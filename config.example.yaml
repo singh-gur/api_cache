@@ -90,3 +90,6 @@ logging:
   format: "json"     # json, text
   output: "stdout"   # stdout, stderr, file
   file_path: "/var/log/api-cache.log"
+  # Query parameters whose values should be replaced with [REDACTED] in logs.
+  # The actual values are still forwarded to the upstream service.
+  redact_query_params: ["apikey", "token", "secret"]
